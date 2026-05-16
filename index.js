@@ -1,579 +1,207 @@
-require('dotenv').config();
+const { Client, GatewayIntentBits, EmbedBuilder, PermissionsBitField, SlashCommandBuilder, REST, Routes } = require('discord.js');
+const fs = require('fs');
+const dotenv = require('dotenv');
+dotenv.config();
 
-const {
-  Client,
-  GatewayIntentBits,
-  PermissionsBitField,
-  REST,
-  Routes,
-  SlashCommandBuilder,
-  EmbedBuilder,
-  ChannelType
-} = require('discord.js');
+const TOKEN = process.env.DISCORD_TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID = process.env.GUILD_ID; // optional, for guild commands
 
-// ================= CLIENT =================
+if (!TOKEN || !CLIENT_ID) {
+  console.error('Missing DISCORD_TOKEN or CLIENT_ID in .env');
+  process.exit(1);
+}
+
+// ---------- persistent settings ----------
+const SETTINGS_FILE = './welcome-settings.json';
+let welcomeChannelId = null;
+function loadSettings() {
+  try {
+    if (fs.existsSync(SETTINGS_FILE)) {
+      const data = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
+      welcomeChannelId = data.channelId || null;
+    }
+  } catch (e) { console.error('Failed to load settings', e); }
+}
+function saveSettings() {
+  fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ channelId: welcomeChannelId }, null, 2));
+}
+loadSettings();
+
+// ---------- client setup ----------
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildModeration
+    GatewayIntentBits.MessageContent
   ]
 });
 
-// ================= STORAGE =================
-const xp = new Map();
-const warns = new Map();
-const joins = new Map();
+// ---------- helper: admin only checker ----------
+function isAdmin(interaction) {
+  return interaction.member.permissions.has(PermissionsBitField.Flags.Administrator);
+}
 
-const settings = {
-  autorole: new Map(),
-  welcome: new Map(),
-  logs: new Map()
-};
+// ---------- the container welcome message ----------
+function buildWelcomeEmbed(member, memberCount) {
+  const guildName = member.guild.name;
+  const userMention = member.toString();
+  const containerText = 
+    `╭─────────────────────────────╮\n` +
+    `│      ★ WELCOME CONTAINER ★     │\n` +
+    `╰─────────────────────────────╯\n\n` +
+    `${userMention} to **${guildName}**\n` +
+    `✨ You are the **${memberCount}** member! ✨`;
 
-// ================= READY =================
-client.once('ready', () => {
-  console.log(`✅ ${client.user.tag} online`);
+  const embed = new EmbedBuilder()
+    .setColor(0x2B2D31)
+    .setTitle('🎉 NEW MEMBER ARRIVED 🎉')
+    .setDescription(`\`\`\`\n${containerText}\n\`\`\``)
+    .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
+    .setFooter({ text: `We now have ${memberCount} members` })
+    .setTimestamp();
+
+  return embed;
+}
+
+// ---------- event: auto welcome ----------
+client.on('guildMemberAdd', async (member) => {
+  if (!welcomeChannelId) return;
+  const channel = member.guild.channels.cache.get(welcomeChannelId);
+  if (!channel) return;
+  const memberCount = member.guild.memberCount;
+  const embed = buildWelcomeEmbed(member, memberCount);
+  await channel.send({ embeds: [embed] }).catch(console.error);
 });
 
-// ================= WELCOMER =================
-client.on('guildMemberAdd', async member => {
-
-  const welcomeChannelId =
-    settings.welcome.get(member.guild.id);
-
-  let channel = null;
-
-  if (welcomeChannelId) {
-    channel =
-      member.guild.channels.cache.get(welcomeChannelId);
-  }
-
-  if (!channel) {
-    channel = member.guild.systemChannel;
-  }
-
-  if (channel) {
-    channel.send(
-      `welcomer ${member} to **${member.guild.name}** u are the **${member.guild.memberCount}** member`
-    );
-  }
-
-  // ===== AUTOROLE =====
-  const roleId =
-    settings.autorole.get(member.guild.id);
-
-  if (roleId) {
-
-    const role =
-      member.guild.roles.cache.get(roleId);
-
-    if (role) {
-      member.roles.add(role).catch(() => {});
-    }
-  }
-
-  // ===== ANTI RAID =====
-  const now = Date.now();
-
-  if (!joins.has(member.guild.id)) {
-    joins.set(member.guild.id, []);
-  }
-
-  const data = joins.get(member.guild.id);
-
-  data.push(now);
-
-  const recent =
-    data.filter(t => now - t < 10000);
-
-  joins.set(member.guild.id, recent);
-
-  if (recent.length >= 5) {
-    channel?.send(
-      '⚠️ Anti-raid triggered!'
-    );
-  }
-});
-
-// ================= LEVEL SYSTEM =================
-client.on('messageCreate', async message => {
-
-  if (!message.guild) return;
-  if (message.author.bot) return;
-
-  const key =
-    `${message.guild.id}-${message.author.id}`;
-
-  let userXp = xp.get(key) || 0;
-
-  userXp += 5;
-
-  xp.set(key, userXp);
-
-  const level =
-    Math.floor(userXp / 100);
-
-  if (userXp % 100 === 0) {
-
-    const embed = new EmbedBuilder()
-      .setTitle('🎉 Level Up')
-      .setDescription(
-        `${message.author} reached level **${level}**`
-      );
-
-    message.channel.send({
-      embeds: [embed]
-    });
-  }
-
-});
-
-// ================= COMMANDS =================
+// ---------- define all slash commands ----------
 const commands = [
-
-  // ===== PING =====
+  // welcomer set (admin only)
   new SlashCommandBuilder()
-    .setName('ping')
-    .setDescription('Ping command'),
+    .setName('welcomer')
+    .setDescription('Set or remove the welcome channel')
+    .addSubcommand(sub => sub.setName('set').setDescription('Set welcome channel').addChannelOption(opt => opt.setName('channel').setDescription('The channel to send welcomes').setRequired(true)))
+    .addSubcommand(sub => sub.setName('remove').setDescription('Remove welcome channel setting')),
 
-  // ===== BAN =====
-  new SlashCommandBuilder()
-    .setName('ban')
-    .setDescription('Ban a user')
-    .addUserOption(option =>
-      option
-        .setName('user')
-        .setDescription('User')
-        .setRequired(true)
-    ),
+  // moderation (admin only)
+  new SlashCommandBuilder().setName('kick').setDescription('Kick a member').addUserOption(opt => opt.setName('user').setDescription('User to kick').setRequired(true)).addStringOption(opt => opt.setName('reason').setDescription('Reason').setRequired(false)),
+  new SlashCommandBuilder().setName('ban').setDescription('Ban a member').addUserOption(opt => opt.setName('user').setDescription('User to ban').setRequired(true)).addStringOption(opt => opt.setName('reason').setDescription('Reason').setRequired(false)),
+  new SlashCommandBuilder().setName('timeout').setDescription('Timeout a member').addUserOption(opt => opt.setName('user').setDescription('User').setRequired(true)).addIntegerOption(opt => opt.setName('minutes').setDescription('Minutes (1-40320)').setRequired(true)),
+  new SlashCommandBuilder().setName('purge').setDescription('Delete recent messages').addIntegerOption(opt => opt.setName('amount').setDescription('Number of messages (1-100)').setRequired(true)),
 
-  // ===== KICK =====
-  new SlashCommandBuilder()
-    .setName('kick')
-    .setDescription('Kick a user')
-    .addUserOption(option =>
-      option
-        .setName('user')
-        .setDescription('User')
-        .setRequired(true)
-    ),
+  // utility
+  new SlashCommandBuilder().setName('ping').setDescription('Check bot latency'),
+  new SlashCommandBuilder().setName('help').setDescription('Show all commands')
+];
 
-  // ===== TIMEOUT =====
-  new SlashCommandBuilder()
-    .setName('timeout')
-    .setDescription('Timeout user')
-    .addUserOption(option =>
-      option
-        .setName('user')
-        .setDescription('User')
-        .setRequired(true)
-    )
-    .addIntegerOption(option =>
-      option
-        .setName('minutes')
-        .setDescription('Minutes')
-        .setRequired(true)
-    ),
-
-  // ===== WARN =====
-  new SlashCommandBuilder()
-    .setName('warn')
-    .setDescription('Warn a user')
-    .addUserOption(option =>
-      option
-        .setName('user')
-        .setDescription('User')
-        .setRequired(true)
-    )
-    .addStringOption(option =>
-      option
-        .setName('reason')
-        .setDescription('Reason')
-        .setRequired(true)
-    ),
-
-  // ===== WARNINGS =====
-  new SlashCommandBuilder()
-    .setName('warnings')
-    .setDescription('Show warnings')
-    .addUserOption(option =>
-      option
-        .setName('user')
-        .setDescription('User')
-        .setRequired(true)
-    ),
-
-  // ===== UNWARN =====
-  new SlashCommandBuilder()
-    .setName('unwarn')
-    .setDescription('Remove warning')
-    .addUserOption(option =>
-      option
-        .setName('user')
-        .setDescription('User')
-        .setRequired(true)
-    )
-    .addIntegerOption(option =>
-      option
-        .setName('id')
-        .setDescription('Warning ID')
-        .setRequired(true)
-    ),
-
-  // ===== PURGE =====
-  new SlashCommandBuilder()
-    .setName('purge')
-    .setDescription('Delete messages')
-    .addIntegerOption(option =>
-      option
-        .setName('amount')
-        .setDescription('Amount')
-        .setRequired(true)
-    ),
-
-  // ===== SET AUTOROLE =====
-  new SlashCommandBuilder()
-    .setName('setautorole')
-    .setDescription('Set autorole')
-    .addRoleOption(option =>
-      option
-        .setName('role')
-        .setDescription('Role')
-        .setRequired(true)
-    ),
-
-  // ===== SETWELCOME =====
-  new SlashCommandBuilder()
-    .setName('setwelcome')
-    .setDescription('Set welcome channel')
-    .addChannelOption(option =>
-      option
-        .setName('channel')
-        .setDescription('Channel')
-        .addChannelTypes(ChannelType.GuildText)
-        .setRequired(true)
-    ),
-
-  // ===== RANK =====
-  new SlashCommandBuilder()
-    .setName('rank')
-    .setDescription('Check rank')
-
-].map(cmd => cmd.toJSON());
-
-// ================= REGISTER COMMANDS =================
-const rest = new REST({
-  version: '10'
-}).setToken(process.env.TOKEN);
-
+// register commands (guild or global)
+const rest = new REST({ version: '10' }).setToken(TOKEN);
 (async () => {
-
   try {
-
-    console.log(
-      '🔄 Registering slash commands...'
-    );
-
-    await rest.put(
-      Routes.applicationGuildCommands(
-        process.env.CLIENT_ID,
-        process.env.GUILD_ID
-      ),
-      { body: commands }
-    );
-
-    console.log(
-      '✅ Slash commands registered'
-    );
-
+    if (GUILD_ID) {
+      await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands.map(cmd => cmd.toJSON()) });
+      console.log(`✅ Registered guild commands in ${GUILD_ID}`);
+    } else {
+      await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands.map(cmd => cmd.toJSON()) });
+      console.log('✅ Registered global commands (may take up to 1 hour)');
+    }
   } catch (err) {
-    console.error(err);
+    console.error('Failed to register commands', err);
   }
-
 })();
 
-// ================= INTERACTION HANDLER =================
-client.on('interactionCreate',
-async interaction => {
+// ---------- interaction handler ----------
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isCommand()) return;
+  const { commandName, options } = interaction;
 
-  if (!interaction.isChatInputCommand())
+  // ---------- welcomer set/remove ----------
+  if (commandName === 'welcomer') {
+    if (!isAdmin(interaction)) return interaction.reply({ content: '❌ You need Administrator permission.', ephemeral: true });
+    const sub = options.getSubcommand();
+    if (sub === 'set') {
+      const channel = options.getChannel('channel');
+      if (channel.type !== 0) return interaction.reply({ content: '❌ Must be a text channel.', ephemeral: true });
+      welcomeChannelId = channel.id;
+      saveSettings();
+      await interaction.reply(`✅ Welcome channel set to ${channel}. Auto‑welcome is enabled.`);
+    } else if (sub === 'remove') {
+      welcomeChannelId = null;
+      saveSettings();
+      await interaction.reply('✅ Welcome channel removed. Auto‑welcome disabled.');
+    }
     return;
-
-  const { commandName } = interaction;
-
-  // ===== PING =====
-  if (commandName === 'ping') {
-    return interaction.reply('🏓 Pong!');
   }
 
-  // ===== BAN =====
-  if (commandName === 'ban') {
-
-    if (
-      !interaction.member.permissions.has(
-        PermissionsBitField.Flags.BanMembers
-      )
-    ) {
-      return interaction.reply({
-        content: '❌ No permission',
-        ephemeral: true
-      });
-    }
-
-    const user =
-      interaction.options.getUser('user');
-
-    const member =
-      await interaction.guild.members
-      .fetch(user.id)
-      .catch(() => null);
-
-    if (!member) {
-      return interaction.reply(
-        '❌ User not found'
-      );
-    }
-
-    await member.ban().catch(() => {});
-
-    return interaction.reply(
-      `✅ Banned ${user.tag}`
-    );
-  }
-
-  // ===== KICK =====
+  // ---------- KICK ----------
   if (commandName === 'kick') {
-
-    const user =
-      interaction.options.getUser('user');
-
-    const member =
-      await interaction.guild.members
-      .fetch(user.id)
-      .catch(() => null);
-
-    if (!member) {
-      return interaction.reply(
-        '❌ User not found'
-      );
-    }
-
-    await member.kick().catch(() => {});
-
-    return interaction.reply(
-      `👢 Kicked ${user.tag}`
-    );
+    if (!isAdmin(interaction)) return interaction.reply({ content: '❌ Admin only.', ephemeral: true });
+    const user = options.getUser('user');
+    const reason = options.getString('reason') || 'No reason provided';
+    const member = interaction.guild.members.cache.get(user.id);
+    if (!member) return interaction.reply({ content: '❌ User not in this server.', ephemeral: true });
+    if (!member.kickable) return interaction.reply({ content: '❌ I cannot kick that user.', ephemeral: true });
+    await member.kick(reason);
+    await interaction.reply(`🔨 Kicked ${user.tag} | Reason: ${reason}`);
   }
 
-  // ===== TIMEOUT =====
-  if (commandName === 'timeout') {
-
-    const user =
-      interaction.options.getUser('user');
-
-    const minutes =
-      interaction.options.getInteger(
-        'minutes'
-      );
-
-    const member =
-      await interaction.guild.members
-      .fetch(user.id)
-      .catch(() => null);
-
-    if (!member) {
-      return interaction.reply(
-        '❌ User not found'
-      );
-    }
-
-    await member.timeout(
-      minutes * 60 * 1000
-    );
-
-    return interaction.reply(
-      `⏰ Timed out ${user.tag}`
-    );
+  // ---------- BAN ----------
+  else if (commandName === 'ban') {
+    if (!isAdmin(interaction)) return interaction.reply({ content: '❌ Admin only.', ephemeral: true });
+    const user = options.getUser('user');
+    const reason = options.getString('reason') || 'No reason provided';
+    const member = interaction.guild.members.cache.get(user.id);
+    if (!member) return interaction.reply({ content: '❌ User not in server.', ephemeral: true });
+    if (!member.bannable) return interaction.reply({ content: '❌ I cannot ban that user.', ephemeral: true });
+    await member.ban({ reason });
+    await interaction.reply(`🔨 Banned ${user.tag} | Reason: ${reason}`);
   }
 
-  // ===== WARN =====
-  if (commandName === 'warn') {
-
-    const user =
-      interaction.options.getUser('user');
-
-    const reason =
-      interaction.options.getString(
-        'reason'
-      );
-
-    if (!warns.has(user.id)) {
-      warns.set(user.id, []);
-    }
-
-    const userWarns =
-      warns.get(user.id);
-
-    const warnData = {
-      id: userWarns.length + 1,
-      reason
-    };
-
-    userWarns.push(warnData);
-
-    return interaction.reply(
-      `⚠️ Warned ${user.tag}\nID: ${warnData.id}\nReason: ${reason}`
-    );
+  // ---------- TIMEOUT ----------
+  else if (commandName === 'timeout') {
+    if (!isAdmin(interaction)) return interaction.reply({ content: '❌ Admin only.', ephemeral: true });
+    const user = options.getUser('user');
+    const minutes = options.getInteger('minutes');
+    if (minutes < 1 || minutes > 40320) return interaction.reply({ content: '❌ Minutes must be between 1 and 40320.', ephemeral: true });
+    const member = interaction.guild.members.cache.get(user.id);
+    if (!member) return interaction.reply({ content: '❌ User not in server.', ephemeral: true });
+    if (!member.moderatable) return interaction.reply({ content: '❌ I cannot timeout that user.', ephemeral: true });
+    const ms = minutes * 60 * 1000;
+    await member.timeout(ms, `Timeout by ${interaction.user.tag}`);
+    await interaction.reply(`⏱️ Timed out ${user.tag} for ${minutes} minutes.`);
   }
 
-  // ===== WARNINGS =====
-  if (commandName === 'warnings') {
+  // ---------- PURGE ----------
+  else if (commandName === 'purge') {
+    if (!isAdmin(interaction)) return interaction.reply({ content: '❌ Admin only.', ephemeral: true });
+    const amount = options.getInteger('amount');
+    if (amount < 1 || amount > 100) return interaction.reply({ content: '❌ Amount must be between 1 and 100.', ephemeral: true });
+    const fetched = await interaction.channel.messages.fetch({ limit: amount });
+    await interaction.channel.bulkDelete(fetched, true);
+    await interaction.reply({ content: `🧹 Deleted ${fetched.size} messages.`, ephemeral: true });
+  }
 
-    const user =
-      interaction.options.getUser('user');
+  // ---------- PING ----------
+  else if (commandName === 'ping') {
+    const sent = await interaction.reply({ content: 'Pinging...', fetchReply: true });
+    const latency = sent.createdTimestamp - interaction.createdTimestamp;
+    await interaction.editReply(`🏓 Pong! Latency: ${latency}ms | API: ${Math.round(client.ws.ping)}ms`);
+  }
 
-    const userWarns =
-      warns.get(user.id) || [];
-
-    if (!userWarns.length) {
-      return interaction.reply(
-        `${user.tag} has no warnings`
-      );
-    }
-
-    const list =
-      userWarns
-      .map(
-        w =>
-        `ID: ${w.id} | ${w.reason}`
+  // ---------- HELP ----------
+  else if (commandName === 'help') {
+    const helpEmbed = new EmbedBuilder()
+      .setColor(0x5865F2)
+      .setTitle('🛠️ All Commands')
+      .addFields(
+        { name: '👋 Welcomer', value: '`/welcomer set #channel` (admin)\n`/welcomer remove` (admin)' },
+        { name: '⚒️ Moderation (admin only)', value: '`/kick`, `/ban`, `/timeout`, `/purge`' },
+        { name: 'ℹ️ Utility', value: '`/ping`, `/help`' }
       )
-      .join('\n');
-
-    return interaction.reply(
-      `⚠️ Warnings for ${user.tag}\n${list}`
-    );
+      .setFooter({ text: 'Auto‑welcome uses the container design you asked for.' });
+    await interaction.reply({ embeds: [helpEmbed] });
   }
-
-  // ===== UNWARN =====
-  if (commandName === 'unwarn') {
-
-    const user =
-      interaction.options.getUser('user');
-
-    const id =
-      interaction.options.getInteger('id');
-
-    const userWarns =
-      warns.get(user.id);
-
-    if (!userWarns) {
-      return interaction.reply(
-        'No warnings'
-      );
-    }
-
-    const filtered =
-      userWarns.filter(
-        w => w.id !== id
-      );
-
-    warns.set(user.id, filtered);
-
-    return interaction.reply(
-      `✅ Removed warning ID ${id}`
-    );
-  }
-
-  // ===== PURGE =====
-  if (commandName === 'purge') {
-
-    const amount =
-      interaction.options.getInteger(
-        'amount'
-      );
-
-    await interaction.channel
-      .bulkDelete(amount);
-
-    return interaction.reply({
-      content:
-        `🗑️ Deleted ${amount} messages`,
-      ephemeral: true
-    });
-  }
-
-  // ===== SET AUTOROLE =====
-  if (commandName === 'setautorole') {
-
-    const role =
-      interaction.options.getRole(
-        'role'
-      );
-
-    settings.autorole.set(
-      interaction.guild.id,
-      role.id
-    );
-
-    return interaction.reply(
-      `✅ Autorole set to ${role.name}`
-    );
-  }
-
-  // ===== SETWELCOME =====
-  if (commandName === 'setwelcome') {
-
-    const channel =
-      interaction.options.getChannel(
-        'channel'
-      );
-
-    settings.welcome.set(
-      interaction.guild.id,
-      channel.id
-    );
-
-    return interaction.reply(
-      `✅ Welcome channel set to ${channel}`
-    );
-  }
-
-  // ===== RANK =====
-  if (commandName === 'rank') {
-
-    const key =
-      `${interaction.guild.id}-${interaction.user.id}`;
-
-    const userXp =
-      xp.get(key) || 0;
-
-    const level =
-      Math.floor(userXp / 100);
-
-    return interaction.reply(
-      `📊 Level: ${level}\nXP: ${userXp}`
-    );
-  }
-
 });
 
-// ================= ANTI CRASH =================
-process.on(
-  'unhandledRejection',
-  err => {
-    console.error(err);
-  }
-);
-
-process.on(
-  'uncaughtException',
-  err => {
-    console.error(err);
-  }
-);
-
-// ================= LOGIN =================
-client.login(process.env.TOKEN);
+client.login(TOKEN); 
