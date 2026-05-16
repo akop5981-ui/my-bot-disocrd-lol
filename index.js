@@ -30,9 +30,10 @@ client.once('ready', () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 });
 
-// ===== WELCOMER + ANTI RAID + AUTOROLE =====
+// ===== WELCOMER + AUTOROLE + ANTI RAID =====
 client.on('guildMemberAdd', async member => {
   try {
+
     const channel = member.guild.systemChannel;
 
     if (channel) {
@@ -41,7 +42,7 @@ client.on('guildMemberAdd', async member => {
       );
     }
 
-    // ===== AUTO ROLE =====
+    // ===== AUTOROLE =====
     const roleId = autorole.get(member.guild.id);
 
     if (roleId) {
@@ -68,7 +69,7 @@ client.on('guildMemberAdd', async member => {
     joins.set(member.guild.id, recent);
 
     if (recent.length >= 5) {
-      channel?.send('⚠️ Anti-raid triggered!');
+      channel?.send('⚠️ Anti-raid detected!');
     }
 
   } catch (err) {
@@ -79,6 +80,7 @@ client.on('guildMemberAdd', async member => {
 // ===== LEVEL SYSTEM =====
 client.on('messageCreate', async message => {
   try {
+
     if (!message.guild) return;
     if (message.author.bot) return;
 
@@ -106,33 +108,37 @@ client.on('messageCreate', async message => {
 // ===== SLASH COMMANDS =====
 const commands = [
 
+  // PING
   new SlashCommandBuilder()
     .setName('ping')
     .setDescription('Ping command'),
 
+  // BAN
   new SlashCommandBuilder()
     .setName('ban')
-    .setDescription('Ban a member')
+    .setDescription('Ban a user')
     .addUserOption(option =>
       option
         .setName('user')
-        .setDescription('User to ban')
+        .setDescription('User')
         .setRequired(true)
     ),
 
+  // KICK
   new SlashCommandBuilder()
     .setName('kick')
-    .setDescription('Kick a member')
+    .setDescription('Kick a user')
     .addUserOption(option =>
       option
         .setName('user')
-        .setDescription('User to kick')
+        .setDescription('User')
         .setRequired(true)
     ),
 
+  // WARN
   new SlashCommandBuilder()
     .setName('warn')
-    .setDescription('Warn a member')
+    .setDescription('Warn a user')
     .addUserOption(option =>
       option
         .setName('user')
@@ -146,9 +152,38 @@ const commands = [
         .setRequired(true)
     ),
 
+  // WARNINGS
+  new SlashCommandBuilder()
+    .setName('warnings')
+    .setDescription('Show warnings')
+    .addUserOption(option =>
+      option
+        .setName('user')
+        .setDescription('User')
+        .setRequired(true)
+    ),
+
+  // UNWARN
+  new SlashCommandBuilder()
+    .setName('unwarn')
+    .setDescription('Remove warning')
+    .addUserOption(option =>
+      option
+        .setName('user')
+        .setDescription('User')
+        .setRequired(true)
+    )
+    .addIntegerOption(option =>
+      option
+        .setName('id')
+        .setDescription('Warning ID')
+        .setRequired(true)
+    ),
+
+  // AUTOROLE
   new SlashCommandBuilder()
     .setName('setautorole')
-    .setDescription('Set autorole')
+    .setDescription('Set auto role')
     .addRoleOption(option =>
       option
         .setName('role')
@@ -159,10 +194,12 @@ const commands = [
 ].map(cmd => cmd.toJSON());
 
 // ===== REGISTER COMMANDS =====
-const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+const rest = new REST({ version: '10' })
+  .setToken(process.env.TOKEN);
 
 (async () => {
   try {
+
     console.log('🔄 Registering slash commands...');
 
     await rest.put(
@@ -171,14 +208,16 @@ const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
     );
 
     console.log('✅ Slash commands registered');
+
   } catch (err) {
     console.error(err);
   }
 })();
 
-// ===== COMMAND HANDLER =====
+// ===== INTERACTION HANDLER =====
 client.on('interactionCreate', async interaction => {
   try {
+
     if (!interaction.isChatInputCommand()) return;
 
     const { commandName } = interaction;
@@ -214,7 +253,9 @@ client.on('interactionCreate', async interaction => {
 
       await member.ban().catch(() => {});
 
-      return interaction.reply(`✅ Banned ${user.tag}`);
+      return interaction.reply(
+        `✅ Banned ${user.tag}`
+      );
     }
 
     // ===== KICK =====
@@ -232,7 +273,9 @@ client.on('interactionCreate', async interaction => {
 
       await member.kick().catch(() => {});
 
-      return interaction.reply(`👢 Kicked ${user.tag}`);
+      return interaction.reply(
+        `👢 Kicked ${user.tag}`
+      );
     }
 
     // ===== WARN =====
@@ -245,10 +288,60 @@ client.on('interactionCreate', async interaction => {
         warns.set(user.id, []);
       }
 
-      warns.get(user.id).push(reason);
+      const userWarns = warns.get(user.id);
+
+      const warnData = {
+        id: userWarns.length + 1,
+        reason
+      };
+
+      userWarns.push(warnData);
 
       return interaction.reply(
-        `⚠️ Warned ${user.tag}\nReason: ${reason}`
+        `⚠️ Warned ${user.tag}\nID: ${warnData.id}\nReason: ${reason}`
+      );
+    }
+
+    // ===== WARNINGS =====
+    if (commandName === 'warnings') {
+
+      const user = interaction.options.getUser('user');
+
+      const userWarns = warns.get(user.id) || [];
+
+      if (!userWarns.length) {
+        return interaction.reply(
+          `${user.tag} has no warnings`
+        );
+      }
+
+      const list = userWarns
+        .map(w => `ID: ${w.id} | ${w.reason}`)
+        .join('\n');
+
+      return interaction.reply(
+        `⚠️ Warnings for ${user.tag}\n${list}`
+      );
+    }
+
+    // ===== UNWARN =====
+    if (commandName === 'unwarn') {
+
+      const user = interaction.options.getUser('user');
+      const id = interaction.options.getInteger('id');
+
+      const userWarns = warns.get(user.id);
+
+      if (!userWarns) {
+        return interaction.reply('No warnings');
+      }
+
+      const filtered = userWarns.filter(w => w.id !== id);
+
+      warns.set(user.id, filtered);
+
+      return interaction.reply(
+        `✅ Removed warning ID ${id}`
       );
     }
 
