@@ -1,34 +1,25 @@
-const { Client, GatewayIntentBits, EmbedBuilder, PermissionsBitField, SlashCommandBuilder, REST, Routes } = require('discord.js');
-const fs = require('fs');
-const dotenv = require('dotenv');
+
+import {
+  Client,
+  GatewayIntentBits,
+  ActivityType,
+  PermissionsBitField,
+  SlashCommandBuilder,
+  REST,
+  Routes,
+  EmbedBuilder,
+  ChannelType,
+  ContainerBuilder,
+  TextDisplayBuilder,
+  SeparatorBuilder,
+  SeparatorSpacingSize,
+  MessageFlags
+} from 'discord.js';
+
+import dotenv from 'dotenv';
 dotenv.config();
 
-const TOKEN = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID = process.env.GUILD_ID; // optional, for guild commands
-
-if (!TOKEN || !CLIENT_ID) {
-  console.error('Missing DISCORD_TOKEN or CLIENT_ID in .env');
-  process.exit(1);
-}
-
-// ---------- persistent settings ----------
-const SETTINGS_FILE = './welcome-settings.json';
-let welcomeChannelId = null;
-function loadSettings() {
-  try {
-    if (fs.existsSync(SETTINGS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
-      welcomeChannelId = data.channelId || null;
-    }
-  } catch (e) { console.error('Failed to load settings', e); }
-}
-function saveSettings() {
-  fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ channelId: welcomeChannelId }, null, 2));
-}
-loadSettings();
-
-// ---------- client setup ----------
+// ================= CLIENT =================
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -38,170 +29,664 @@ const client = new Client({
   ]
 });
 
-// ---------- helper: admin only checker ----------
-function isAdmin(interaction) {
-  return interaction.member.permissions.has(PermissionsBitField.Flags.Administrator);
-}
+// ================= PREFIX =================
+const PREFIX = '.';
 
-// ---------- the container welcome message ----------
-function buildWelcomeEmbed(member, memberCount) {
-  const guildName = member.guild.name;
-  const userMention = member.toString();
-  const containerText = 
-    `╭─────────────────────────────╮\n` +
-    `│      ★ WELCOME CONTAINER ★     │\n` +
-    `╰─────────────────────────────╯\n\n` +
-    `${userMention} to **${guildName}**\n` +
-    `✨ You are the **${memberCount}** member! ✨`;
+// ================= STORAGE =================
+const afk = new Map();
+const warnings = new Map();
+const welcomeChannels = new Map();
+const autoRoles = new Map();
+const autoReact = new Map();
 
-  const embed = new EmbedBuilder()
-    .setColor(0x2B2D31)
-    .setTitle('🎉 NEW MEMBER ARRIVED 🎉')
-    .setDescription(`\`\`\`\n${containerText}\n\`\`\``)
-    .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
-    .setFooter({ text: `We now have ${memberCount} members` })
-    .setTimestamp();
+// ================= READY =================
+client.once('clientReady', async () => {
 
-  return embed;
-}
+  console.log(`${client.user?.tag} online`);
 
-// ---------- event: auto welcome ----------
-client.on('guildMemberAdd', async (member) => {
-  if (!welcomeChannelId) return;
-  const channel = member.guild.channels.cache.get(welcomeChannelId);
-  if (!channel) return;
-  const memberCount = member.guild.memberCount;
-  const embed = buildWelcomeEmbed(member, memberCount);
-  await channel.send({ embeds: [embed] }).catch(console.error);
-});
+  client.user?.setPresence({
+    status: 'dnd',
+    activities: [
+      {
+        name: 'N3xel',
+        type: ActivityType.Playing
+      }
+    ]
+  });
 
-// ---------- define all slash commands ----------
-const commands = [
-  // welcomer set (admin only)
-  new SlashCommandBuilder()
-    .setName('welcomer')
-    .setDescription('Set or remove the welcome channel')
-    .addSubcommand(sub => sub.setName('set').setDescription('Set welcome channel').addChannelOption(opt => opt.setName('channel').setDescription('The channel to send welcomes').setRequired(true)))
-    .addSubcommand(sub => sub.setName('remove').setDescription('Remove welcome channel setting')),
+  // ================= SLASH COMMANDS =================
+  const commands = [
 
-  // moderation (admin only)
-  new SlashCommandBuilder().setName('kick').setDescription('Kick a member').addUserOption(opt => opt.setName('user').setDescription('User to kick').setRequired(true)).addStringOption(opt => opt.setName('reason').setDescription('Reason').setRequired(false)),
-  new SlashCommandBuilder().setName('ban').setDescription('Ban a member').addUserOption(opt => opt.setName('user').setDescription('User to ban').setRequired(true)).addStringOption(opt => opt.setName('reason').setDescription('Reason').setRequired(false)),
-  new SlashCommandBuilder().setName('timeout').setDescription('Timeout a member').addUserOption(opt => opt.setName('user').setDescription('User').setRequired(true)).addIntegerOption(opt => opt.setName('minutes').setDescription('Minutes (1-40320)').setRequired(true)),
-  new SlashCommandBuilder().setName('purge').setDescription('Delete recent messages').addIntegerOption(opt => opt.setName('amount').setDescription('Number of messages (1-100)').setRequired(true)),
+    // ================= AFK =================
+    new SlashCommandBuilder()
+      .setName('afk')
+      .setDescription('Set AFK')
+      .addStringOption(option =>
+        option
+          .setName('reason')
+          .setDescription('Reason')
+          .setRequired(true)
+      ),
 
-  // utility
-  new SlashCommandBuilder().setName('ping').setDescription('Check bot latency'),
-  new SlashCommandBuilder().setName('help').setDescription('Show all commands')
-];
+    // ================= AVATAR =================
+    new SlashCommandBuilder()
+      .setName('avatar')
+      .setDescription('View avatar')
+      .addUserOption(option =>
+        option
+          .setName('user')
+          .setDescription('Target user')
+      ),
 
-// register commands (guild or global)
-const rest = new REST({ version: '10' }).setToken(TOKEN);
-(async () => {
-  try {
-    if (GUILD_ID) {
-      await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands.map(cmd => cmd.toJSON()) });
-      console.log(`✅ Registered guild commands in ${GUILD_ID}`);
-    } else {
-      await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands.map(cmd => cmd.toJSON()) });
-      console.log('✅ Registered global commands (may take up to 1 hour)');
-    }
-  } catch (err) {
-    console.error('Failed to register commands', err);
-  }
-})();
-
-// ---------- interaction handler ----------
-client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isCommand()) return;
-  const { commandName, options } = interaction;
-
-  // ---------- welcomer set/remove ----------
-  if (commandName === 'welcomer') {
-    if (!isAdmin(interaction)) return interaction.reply({ content: '❌ You need Administrator permission.', ephemeral: true });
-    const sub = options.getSubcommand();
-    if (sub === 'set') {
-      const channel = options.getChannel('channel');
-      if (channel.type !== 0) return interaction.reply({ content: '❌ Must be a text channel.', ephemeral: true });
-      welcomeChannelId = channel.id;
-      saveSettings();
-      await interaction.reply(`✅ Welcome channel set to ${channel}. Auto‑welcome is enabled.`);
-    } else if (sub === 'remove') {
-      welcomeChannelId = null;
-      saveSettings();
-      await interaction.reply('✅ Welcome channel removed. Auto‑welcome disabled.');
-    }
-    return;
-  }
-
-  // ---------- KICK ----------
-  if (commandName === 'kick') {
-    if (!isAdmin(interaction)) return interaction.reply({ content: '❌ Admin only.', ephemeral: true });
-    const user = options.getUser('user');
-    const reason = options.getString('reason') || 'No reason provided';
-    const member = interaction.guild.members.cache.get(user.id);
-    if (!member) return interaction.reply({ content: '❌ User not in this server.', ephemeral: true });
-    if (!member.kickable) return interaction.reply({ content: '❌ I cannot kick that user.', ephemeral: true });
-    await member.kick(reason);
-    await interaction.reply(`🔨 Kicked ${user.tag} | Reason: ${reason}`);
-  }
-
-  // ---------- BAN ----------
-  else if (commandName === 'ban') {
-    if (!isAdmin(interaction)) return interaction.reply({ content: '❌ Admin only.', ephemeral: true });
-    const user = options.getUser('user');
-    const reason = options.getString('reason') || 'No reason provided';
-    const member = interaction.guild.members.cache.get(user.id);
-    if (!member) return interaction.reply({ content: '❌ User not in server.', ephemeral: true });
-    if (!member.bannable) return interaction.reply({ content: '❌ I cannot ban that user.', ephemeral: true });
-    await member.ban({ reason });
-    await interaction.reply(`🔨 Banned ${user.tag} | Reason: ${reason}`);
-  }
-
-  // ---------- TIMEOUT ----------
-  else if (commandName === 'timeout') {
-    if (!isAdmin(interaction)) return interaction.reply({ content: '❌ Admin only.', ephemeral: true });
-    const user = options.getUser('user');
-    const minutes = options.getInteger('minutes');
-    if (minutes < 1 || minutes > 40320) return interaction.reply({ content: '❌ Minutes must be between 1 and 40320.', ephemeral: true });
-    const member = interaction.guild.members.cache.get(user.id);
-    if (!member) return interaction.reply({ content: '❌ User not in server.', ephemeral: true });
-    if (!member.moderatable) return interaction.reply({ content: '❌ I cannot timeout that user.', ephemeral: true });
-    const ms = minutes * 60 * 1000;
-    await member.timeout(ms, `Timeout by ${interaction.user.tag}`);
-    await interaction.reply(`⏱️ Timed out ${user.tag} for ${minutes} minutes.`);
-  }
-
-  // ---------- PURGE ----------
-  else if (commandName === 'purge') {
-    if (!isAdmin(interaction)) return interaction.reply({ content: '❌ Admin only.', ephemeral: true });
-    const amount = options.getInteger('amount');
-    if (amount < 1 || amount > 100) return interaction.reply({ content: '❌ Amount must be between 1 and 100.', ephemeral: true });
-    const fetched = await interaction.channel.messages.fetch({ limit: amount });
-    await interaction.channel.bulkDelete(fetched, true);
-    await interaction.reply({ content: `🧹 Deleted ${fetched.size} messages.`, ephemeral: true });
-  }
-
-  // ---------- PING ----------
-  else if (commandName === 'ping') {
-    const sent = await interaction.reply({ content: 'Pinging...', fetchReply: true });
-    const latency = sent.createdTimestamp - interaction.createdTimestamp;
-    await interaction.editReply(`🏓 Pong! Latency: ${latency}ms | API: ${Math.round(client.ws.ping)}ms`);
-  }
-
-  // ---------- HELP ----------
-  else if (commandName === 'help') {
-    const helpEmbed = new EmbedBuilder()
-      .setColor(0x5865F2)
-      .setTitle('🛠️ All Commands')
-      .addFields(
-        { name: '👋 Welcomer', value: '`/welcomer set #channel` (admin)\n`/welcomer remove` (admin)' },
-        { name: '⚒️ Moderation (admin only)', value: '`/kick`, `/ban`, `/timeout`, `/purge`' },
-        { name: 'ℹ️ Utility', value: '`/ping`, `/help`' }
+    // ================= SAY =================
+    new SlashCommandBuilder()
+      .setName('say')
+      .setDescription('Send message')
+      .addChannelOption(option =>
+        option
+          .setName('channel')
+          .setDescription('Target channel')
+          .addChannelTypes(ChannelType.GuildText)
+          .setRequired(true)
       )
-      .setFooter({ text: 'Auto‑welcome uses the container design you asked for.' });
-    await interaction.reply({ embeds: [helpEmbed] });
-  }
+      .addStringOption(option =>
+        option
+          .setName('text')
+          .setDescription('Message')
+          .setRequired(true)
+      ),
+
+    // ================= WELCOME ENABLE =================
+    new SlashCommandBuilder()
+      .setName('welcomeenable')
+      .setDescription('Enable welcome')
+      .addChannelOption(option =>
+        option
+          .setName('channel')
+          .setDescription('Welcome channel')
+          .addChannelTypes(ChannelType.GuildText)
+          .setRequired(true)
+      ),
+
+    // ================= WELCOME DISABLE =================
+    new SlashCommandBuilder()
+      .setName('welcomedisable')
+      .setDescription('Disable welcome'),
+
+    // ================= AUTOROLE =================
+    new SlashCommandBuilder()
+      .setName('autorole')
+      .setDescription('Set autorole')
+      .addRoleOption(option =>
+        option
+          .setName('role')
+          .setDescription('Role')
+          .setRequired(true)
+      ),
+
+    // ================= WARN =================
+    new SlashCommandBuilder()
+      .setName('warn')
+      .setDescription('Warn user')
+      .addUserOption(option =>
+        option
+          .setName('user')
+          .setDescription('User')
+          .setRequired(true)
+      )
+      .addStringOption(option =>
+        option
+          .setName('reason')
+          .setDescription('Reason')
+          .setRequired(true)
+      ),
+
+    // ================= WARNINGS =================
+    new SlashCommandBuilder()
+      .setName('warnings')
+      .setDescription('View warnings')
+      .addUserOption(option =>
+        option
+          .setName('user')
+          .setDescription('User')
+          .setRequired(true)
+      ),
+
+    // ================= UNWARN =================
+    new SlashCommandBuilder()
+      .setName('unwarn')
+      .setDescription('Remove warning')
+      .addUserOption(option =>
+        option
+          .setName('user')
+          .setDescription('User')
+          .setRequired(true)
+      )
+      .addIntegerOption(option =>
+        option
+          .setName('id')
+          .setDescription('Warning ID')
+          .setRequired(true)
+      )
+
+  ].map(command => command.toJSON());
+
+  const rest = new REST({
+    version: '10'
+  }).setToken(process.env.TOKEN as string);
+
+  await rest.put(
+    Routes.applicationCommands(
+      client.user!.id
+    ),
+    { body: commands }
+  );
+
+  console.log('Slash commands loaded');
+
 });
 
-client.login(TOKEN); 
+// ================= MEMBER JOIN =================
+client.on('guildMemberAdd', async (member) => {
+
+  // ================= WELCOME =================
+  const welcomeChannel =
+    welcomeChannels.get(member.guild.id);
+
+  if (welcomeChannel) {
+
+    const channel =
+      member.guild.channels.cache.get(
+        welcomeChannel
+      );
+
+    if (
+      channel &&
+      channel.isTextBased()
+    ) {
+
+      const container =
+        new ContainerBuilder()
+          .setAccentColor(0x000000)
+
+          .addTextDisplayComponents(
+
+            new TextDisplayBuilder()
+              .setContent(
+                `welcomer ${member} to **${member.guild.name}** u are the **${member.guild.memberCount}th** member`
+              )
+
+          )
+
+          .addSeparatorComponents(
+
+            new SeparatorBuilder()
+              .setSpacing(
+                SeparatorSpacingSize.Large
+              )
+
+          )
+
+          .addTextDisplayComponents(
+
+            new TextDisplayBuilder()
+              .setContent(
+                `[bot link](https://discord.com/channels/1502271579634008084/1504341678520008734)\n[law! Must read it.](https://discord.com/channels/1502271579634008084/1504333246232658031)\n[updates!](https://discord.com/channels/1502271579634008084/1504342351622049812)`
+              )
+
+          );
+
+      await channel.send({
+        components: [container],
+        flags: MessageFlags.IsComponentsV2
+      });
+
+    }
+
+  }
+
+  // ================= AUTOROLE =================
+  const roleId =
+    autoRoles.get(member.guild.id);
+
+  if (roleId) {
+
+    const role =
+      member.guild.roles.cache.get(
+        roleId
+      );
+
+    if (role) {
+
+      member.roles.add(role)
+        .catch(() => {});
+
+    }
+
+  }
+
+});
+
+// ================= MESSAGE CREATE =================
+client.on('messageCreate', async (message) => {
+
+  if (message.author.bot) return;
+
+  // ================= AUTOREACT =================
+  const emoji =
+    autoReact.get(message.channel.id);
+
+  if (emoji) {
+
+    message.react(emoji)
+      .catch(() => {});
+
+  }
+
+  // ================= AFK MENTION =================
+  message.mentions.users.forEach(user => {
+
+    if (afk.has(user.id)) {
+
+      const data =
+        afk.get(user.id);
+
+      message.reply(
+        `${user.username} is AFK\nReason: ${data.reason}`
+      );
+
+    }
+
+  });
+
+  // ================= REMOVE AFK =================
+  if (
+    afk.has(message.author.id) &&
+    !message.content.startsWith('.afk')
+  ) {
+
+    afk.delete(message.author.id);
+
+    message.channel.send(
+      `Welcome back ${message.author}`
+    );
+
+  }
+
+  if (
+    !message.content.startsWith(PREFIX)
+  ) return;
+
+  const args =
+    message.content
+      .slice(PREFIX.length)
+      .trim()
+      .split(/ +/);
+
+  const cmd =
+    args.shift()?.toLowerCase();
+
+  // ================= AFK =================
+  if (cmd === 'afk') {
+
+    const reason =
+      args.join(' ') || 'No reason';
+
+    afk.set(message.author.id, {
+      reason
+    });
+
+    return message.reply(
+      `${message.author.username} is now AFK\nReason: ${reason}`
+    );
+
+  }
+
+  // ================= AVATAR =================
+  if (cmd === 'avatar') {
+
+    const user =
+      message.mentions.users.first() ||
+      message.author;
+
+    const embed =
+      new EmbedBuilder()
+        .setColor(0x000000)
+        .setTitle(
+          `${user.username} Avatar`
+        )
+        .setImage(
+          user.displayAvatarURL({
+            size: 1024
+          })
+        );
+
+    return message.reply({
+      embeds: [embed]
+    });
+
+  }
+
+  // ================= SAY =================
+  if (cmd === 'say') {
+
+    if (
+      !message.member?.permissions.has(
+        PermissionsBitField.Flags.Administrator
+      )
+    ) {
+      return message.reply(
+        'Admin only'
+      );
+    }
+
+    const channel =
+      message.mentions.channels.first();
+
+    if (!channel) {
+
+      return message.reply(
+        'Usage: .say #channel hello'
+      );
+
+    }
+
+    const text =
+      args.slice(1).join(' ');
+
+    if (!text) {
+
+      return message.reply(
+        'Usage: .say #channel hello'
+      );
+
+    }
+
+    await channel.send(text);
+
+    message.delete()
+      .catch(() => {});
+
+  }
+
+  // ================= STEAL EMOJI =================
+  if (cmd === 'steal') {
+
+    const emoji = args[0];
+    const name = args[1];
+
+    if (!emoji || !name) {
+
+      return message.reply(
+        'Usage: .steal <emoji> <name>'
+      );
+
+    }
+
+    const regex =
+      /<(a)?:\w+:(\d+)>/;
+
+    const match =
+      emoji.match(regex);
+
+    if (!match) {
+
+      return message.reply(
+        'Invalid emoji'
+      );
+
+    }
+
+    const animated =
+      match[1];
+
+    const emojiId =
+      match[2];
+
+    const url =
+      `https://cdn.discordapp.com/emojis/${emojiId}.${animated ? 'gif' : 'png'}?quality=lossless`;
+
+    try {
+
+      const created =
+        await message.guild?.emojis.create({
+          attachment: url,
+          name
+        });
+
+      message.reply(
+        `Added emoji ${created}`
+      );
+
+    } catch {
+
+      message.reply(
+        'Failed to steal emoji'
+      );
+
+    }
+
+  }
+
+  // ================= STEAL STICKER =================
+  if (cmd === 'stealsticker') {
+
+    const name = args[0];
+
+    if (!name) {
+
+      return message.reply(
+        'Usage: .stealsticker <name>'
+      );
+
+    }
+
+    if (!message.reference) {
+
+      return message.reply(
+        'Reply to sticker message'
+      );
+
+    }
+
+    try {
+
+      const replied =
+        await message.channel.messages.fetch(
+          message.reference.messageId
+        );
+
+      const sticker =
+        replied.stickers.first();
+
+      if (!sticker) {
+
+        return message.reply(
+          'No sticker found'
+        );
+
+      }
+
+      await message.guild?.stickers.create({
+        file: sticker.url,
+        name,
+        tags: 'sticker'
+      });
+
+      message.reply(
+        `Sticker ${name} added`
+      );
+
+    } catch {
+
+      message.reply(
+        'Failed to steal sticker'
+      );
+
+    }
+
+  }
+
+});
+
+// ================= INTERACTIONS =================
+client.on('interactionCreate', async (interaction) => {
+
+  if (
+    !interaction.isChatInputCommand()
+  ) return;
+
+  // ================= AFK =================
+  if (
+    interaction.commandName === 'afk'
+  ) {
+
+    const reason =
+      interaction.options.getString(
+        'reason'
+      );
+
+    afk.set(interaction.user.id, {
+      reason
+    });
+
+    return interaction.reply({
+      content:
+        `${interaction.user.username} is now AFK\nReason: ${reason}`
+    });
+
+  }
+
+  // ================= AVATAR =================
+  if (
+    interaction.commandName === 'avatar'
+  ) {
+
+    const user =
+      interaction.options.getUser(
+        'user'
+      ) || interaction.user;
+
+    const embed =
+      new EmbedBuilder()
+        .setColor(0x000000)
+        .setTitle(
+          `${user.username} Avatar`
+        )
+        .setImage(
+          user.displayAvatarURL({
+            size: 1024
+          })
+        );
+
+    return interaction.reply({
+      embeds: [embed]
+    });
+
+  }
+
+  // ================= SAY =================
+  if (
+    interaction.commandName === 'say'
+  ) {
+
+    const channel =
+      interaction.options.getChannel(
+        'channel'
+      );
+
+    const text =
+      interaction.options.getString(
+        'text'
+      );
+
+    if (
+      channel &&
+      channel.isTextBased()
+    ) {
+
+      await channel.send(text!);
+
+    }
+
+    return interaction.reply({
+      content: 'Sent',
+      ephemeral: true
+    });
+
+  }
+
+  // ================= WELCOME ENABLE =================
+  if (
+    interaction.commandName ===
+    'welcomeenable'
+  ) {
+
+    const channel =
+      interaction.options.getChannel(
+        'channel'
+      );
+
+    if (!channel) return;
+
+    welcomeChannels.set(
+      interaction.guildId!,
+      channel.id
+    );
+
+    return interaction.reply({
+      content:
+        `Welcome enabled in ${channel}`,
+      ephemeral: true
+    });
+
+  }
+
+  // ================= WELCOME DISABLE =================
+  if (
+    interaction.commandName ===
+    'welcomedisable'
+  ) {
+
+    welcomeChannels.delete(
+      interaction.guildId!
+    );
+
+    return interaction.reply({
+      content:
+        'Welcome disabled',
+      ephemeral: true
+    });
+
+  }
+
+  // ================= AUTOROLE =================
+  if (
+    interaction.commandName ===
+    'autorole'
+  ) {
+
+    const role =
+      interaction.options.getRole(
+        'role'
+      );
+
+    if (!role) return;
+
+    autoRoles.set(
+      interaction.guildId!,
+      role.id
+    );
+
+    return interaction.reply({
+      content:
+        `Autorole set to ${role}`,
+      ephemeral: true
+    });
+
+  }
+
+});
+
+// ================= LOGIN =================
+client.login(process.env.TOKEN as string);
