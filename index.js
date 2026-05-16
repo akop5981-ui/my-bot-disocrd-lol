@@ -1,11 +1,15 @@
 require('dotenv').config();
+
 const {
   Client,
   GatewayIntentBits,
-  Collection,
-  PermissionsBitField
+  PermissionsBitField,
+  REST,
+  Routes,
+  SlashCommandBuilder
 } = require('discord.js');
 
+// ===== CLIENT =====
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -23,113 +27,255 @@ const autorole = new Map();
 
 // ===== READY =====
 client.once('ready', () => {
-  console.log(`${client.user.tag} is online`);
+  console.log(`✅ Logged in as ${client.user.tag}`);
 });
 
-// ===== WELCOMER =====
+// ===== WELCOMER + ANTI RAID + AUTOROLE =====
 client.on('guildMemberAdd', async member => {
-  const channel = member.guild.systemChannel;
-  if (!channel) return;
+  try {
+    const channel = member.guild.systemChannel;
 
-  channel.send(
-    `welcomer ${member} to **${member.guild.name}** u are the **${member.guild.memberCount}** member`
-  );
+    if (channel) {
+      channel.send(
+        `welcomer ${member} to **${member.guild.name}** u are the **${member.guild.memberCount}** member`
+      );
+    }
 
-  // AUTO ROLE
-  const roleId = autorole.get(member.guild.id);
-  if (roleId) {
-    const role = member.guild.roles.cache.get(roleId);
-    if (role) member.roles.add(role).catch(() => {});
-  }
+    // ===== AUTO ROLE =====
+    const roleId = autorole.get(member.guild.id);
 
-  // ANTI RAID
-  const now = Date.now();
+    if (roleId) {
+      const role = member.guild.roles.cache.get(roleId);
 
-  if (!joins.has(member.guild.id)) joins.set(member.guild.id, []);
-  const data = joins.get(member.guild.id);
+      if (role) {
+        await member.roles.add(role).catch(() => {});
+      }
+    }
 
-  data.push(now);
+    // ===== ANTI RAID =====
+    const now = Date.now();
 
-  const recent = data.filter(t => now - t < 10000);
-  joins.set(member.guild.id, recent);
+    if (!joins.has(member.guild.id)) {
+      joins.set(member.guild.id, []);
+    }
 
-  if (recent.length >= 5) {
-    member.guild.systemChannel?.send("⚠️ Anti-raid detected!");
+    const data = joins.get(member.guild.id);
+
+    data.push(now);
+
+    const recent = data.filter(t => now - t < 10000);
+
+    joins.set(member.guild.id, recent);
+
+    if (recent.length >= 5) {
+      channel?.send('⚠️ Anti-raid triggered!');
+    }
+
+  } catch (err) {
+    console.error(err);
   }
 });
 
 // ===== LEVEL SYSTEM =====
-client.on('messageCreate', message => {
-  if (message.author.bot) return;
-  if (!message.guild) return;
+client.on('messageCreate', async message => {
+  try {
+    if (!message.guild) return;
+    if (message.author.bot) return;
 
-  const key = `${message.guild.id}-${message.author.id}`;
+    const key = `${message.guild.id}-${message.author.id}`;
 
-  let userXp = xp.get(key) || 0;
-  userXp += 5;
-  xp.set(key, userXp);
+    let userXp = xp.get(key) || 0;
 
-  const level = Math.floor(userXp / 100);
+    userXp += 5;
 
-  if (userXp % 100 === 0) {
-    message.channel.send(`${message.author} reached level **${level}** 🎉`);
+    xp.set(key, userXp);
+
+    const level = Math.floor(userXp / 100);
+
+    if (userXp % 100 === 0) {
+      message.channel.send(
+        `${message.author} reached level **${level}** 🎉`
+      );
+    }
+
+  } catch (err) {
+    console.error(err);
   }
-
-  // SIMPLE WARN CHECK (optional auto action)
 });
 
-// ===== SLASH COMMAND HANDLER =====
+// ===== SLASH COMMANDS =====
+const commands = [
+
+  new SlashCommandBuilder()
+    .setName('ping')
+    .setDescription('Ping command'),
+
+  new SlashCommandBuilder()
+    .setName('ban')
+    .setDescription('Ban a member')
+    .addUserOption(option =>
+      option
+        .setName('user')
+        .setDescription('User to ban')
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('kick')
+    .setDescription('Kick a member')
+    .addUserOption(option =>
+      option
+        .setName('user')
+        .setDescription('User to kick')
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('warn')
+    .setDescription('Warn a member')
+    .addUserOption(option =>
+      option
+        .setName('user')
+        .setDescription('User')
+        .setRequired(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName('reason')
+        .setDescription('Reason')
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('setautorole')
+    .setDescription('Set autorole')
+    .addRoleOption(option =>
+      option
+        .setName('role')
+        .setDescription('Role')
+        .setRequired(true)
+    )
+
+].map(cmd => cmd.toJSON());
+
+// ===== REGISTER COMMANDS =====
+const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+
+(async () => {
+  try {
+    console.log('🔄 Registering slash commands...');
+
+    await rest.put(
+      Routes.applicationCommands(process.env.CLIENT_ID),
+      { body: commands }
+    );
+
+    console.log('✅ Slash commands registered');
+  } catch (err) {
+    console.error(err);
+  }
+})();
+
+// ===== COMMAND HANDLER =====
 client.on('interactionCreate', async interaction => {
-  if (!interaction.isChatInputCommand()) return;
+  try {
+    if (!interaction.isChatInputCommand()) return;
 
-  const { commandName } = interaction;
+    const { commandName } = interaction;
 
-  // ===== BAN =====
-  if (commandName === 'ban') {
-    if (!interaction.member.permissions.has(PermissionsBitField.Flags.BanMembers))
-      return interaction.reply({ content: 'No permission', ephemeral: true });
+    // ===== PING =====
+    if (commandName === 'ping') {
+      return interaction.reply('🏓 Pong!');
+    }
 
-    const user = interaction.options.getUser('user');
-    const member = await interaction.guild.members.fetch(user.id);
+    // ===== BAN =====
+    if (commandName === 'ban') {
 
-    await member.ban();
-    return interaction.reply(`✅ Banned ${user.tag}`);
+      if (
+        !interaction.member.permissions.has(
+          PermissionsBitField.Flags.BanMembers
+        )
+      ) {
+        return interaction.reply({
+          content: '❌ No permission',
+          ephemeral: true
+        });
+      }
+
+      const user = interaction.options.getUser('user');
+
+      const member = await interaction.guild.members
+        .fetch(user.id)
+        .catch(() => null);
+
+      if (!member) {
+        return interaction.reply('❌ User not found');
+      }
+
+      await member.ban().catch(() => {});
+
+      return interaction.reply(`✅ Banned ${user.tag}`);
+    }
+
+    // ===== KICK =====
+    if (commandName === 'kick') {
+
+      const user = interaction.options.getUser('user');
+
+      const member = await interaction.guild.members
+        .fetch(user.id)
+        .catch(() => null);
+
+      if (!member) {
+        return interaction.reply('❌ User not found');
+      }
+
+      await member.kick().catch(() => {});
+
+      return interaction.reply(`👢 Kicked ${user.tag}`);
+    }
+
+    // ===== WARN =====
+    if (commandName === 'warn') {
+
+      const user = interaction.options.getUser('user');
+      const reason = interaction.options.getString('reason');
+
+      if (!warns.has(user.id)) {
+        warns.set(user.id, []);
+      }
+
+      warns.get(user.id).push(reason);
+
+      return interaction.reply(
+        `⚠️ Warned ${user.tag}\nReason: ${reason}`
+      );
+    }
+
+    // ===== AUTOROLE =====
+    if (commandName === 'setautorole') {
+
+      const role = interaction.options.getRole('role');
+
+      autorole.set(interaction.guild.id, role.id);
+
+      return interaction.reply(
+        `✅ Autorole set to ${role.name}`
+      );
+    }
+
+  } catch (err) {
+    console.error(err);
   }
+});
 
-  // ===== KICK =====
-  if (commandName === 'kick') {
-    const user = interaction.options.getUser('user');
-    const member = await interaction.guild.members.fetch(user.id);
+// ===== ANTI CRASH =====
+process.on('unhandledRejection', err => {
+  console.error('Unhandled Rejection:', err);
+});
 
-    await member.kick();
-    return interaction.reply(`👢 Kicked ${user.tag}`);
-  }
-
-  // ===== WARN =====
-  if (commandName === 'warn') {
-    const user = interaction.options.getUser('user');
-    const reason = interaction.options.getString('reason');
-
-    const key = user.id;
-
-    if (!warns.has(key)) warns.set(key, []);
-    warns.get(key).push(reason);
-
-    return interaction.reply(`⚠️ Warned ${user.tag} | Reason: ${reason}`);
-  }
-
-  // ===== SET AUTOROLE =====
-  if (commandName === 'setautorole') {
-    const role = interaction.options.getRole('role');
-    autorole.set(interaction.guild.id, role.id);
-
-    return interaction.reply(`✅ Auto role set to ${role.name}`);
-  }
-
-  // ===== SET WELCOME (simple placeholder) =====
-  if (commandName === 'setwelcome') {
-    return interaction.reply(`✅ Welcome is already system channel (basic version)`);
-  }
+process.on('uncaughtException', err => {
+  console.error('Uncaught Exception:', err);
 });
 
 // ===== LOGIN =====
